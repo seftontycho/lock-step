@@ -1,104 +1,114 @@
-use std::{fmt::Debug, rc::Rc};
+use lock_step::{Preprocessor, PreprocessorPair, Step, System, SystemPair};
 
-use lock_step::{State, Step, System};
+#[derive(Hash)]
+struct AddOne;
 
-trait Metric {
-    fn record(&mut self, value: usize);
-}
+impl Preprocessor<i32> for AddOne {
+    fn preprocess(&mut self, value: &i32) -> *mut u8 {
+        Box::into_raw(Box::new(value + 1)) as *mut u8
+    }
 
-struct MetricRecorder<M: Metric> {
-    metric: M,
-}
-
-impl<M: Metric + Debug> std::fmt::Debug for MetricRecorder<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MetricRecorder")
-            .field("metric", &self.metric)
-            .finish()
+    unsafe fn cleanup(&mut self, value: *mut u8) {
+        let _ = Box::from_raw(value as *mut i32);
     }
 }
 
-impl<M: Metric + Debug> System<usize> for MetricRecorder<M> {
-    fn step(&mut self, value: Rc<usize>) -> State {
-        self.metric.record(*value);
-        State::Running
+#[derive(Hash)]
+struct ToString;
+
+impl Preprocessor<i32> for ToString {
+    fn preprocess(&mut self, value: &i32) -> *mut u8 {
+        Box::into_raw(Box::new(value.to_string())) as *mut u8
+    }
+
+    unsafe fn cleanup(&mut self, value: *mut u8) {
+        let _ = Box::from_raw(value as *mut String);
     }
 }
 
-impl<M: Metric> MetricRecorder<M> {
-    fn new(metric: M) -> Self {
-        MetricRecorder { metric }
+struct IntPrinter {
+    max: i32,
+    count: i32,
+}
+
+impl IntPrinter {
+    fn new(max: i32) -> Self {
+        IntPrinter { max, count: 0 }
     }
 }
 
-#[derive(Debug)]
-struct Counter {
-    count: usize,
-}
+impl System for IntPrinter {
+    fn step(&mut self, value: *mut u8) -> lock_step::State {
+        // Is this casting safe if we are sure that the value is an i32?
+        let value = unsafe { Box::from_raw(value as *mut i32) };
+        println!("Int: {}", value);
 
-impl Metric for Counter {
-    fn record(&mut self, value: usize) {
-        self.count += value;
-    }
-}
+        // Need to leak here to avoid freeing before other systems try and use it
+        let _ = Box::into_raw(value);
 
-struct Average {
-    sum: usize,
-    count: usize,
-}
-
-impl std::fmt::Debug for Average {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Average")
-            .field("avg", &(self.sum / self.count))
-            .field("sum", &self.sum)
-            .field("count", &self.count)
-            .finish()
-    }
-}
-
-impl Metric for Average {
-    fn record(&mut self, value: usize) {
-        self.sum += value;
         self.count += 1;
+
+        if self.count == self.max {
+            return lock_step::State::Stopped;
+        }
+
+        lock_step::State::Running
     }
 }
 
-#[derive(Debug)]
-struct Maximum {
-    max: usize,
+struct StringPrinter {
+    max: i32,
+    count: i32,
 }
 
-impl Metric for Maximum {
-    fn record(&mut self, value: usize) {
-        if value > self.max {
-            self.max = value;
-        }
+impl StringPrinter {
+    fn new(max: i32) -> Self {
+        StringPrinter { max, count: 0 }
     }
 }
 
-#[derive(Debug)]
-struct Minimum {
-    min: usize,
-}
+impl System for StringPrinter {
+    fn step(&mut self, value: *mut u8) -> lock_step::State {
+        // Is this casting safe if we are sure that the value is a String?
+        let value = unsafe { Box::from_raw(value as *mut String) };
+        println!("String: {}", value);
 
-impl Metric for Minimum {
-    fn record(&mut self, value: usize) {
-        if value < self.min {
-            self.min = value;
+        // Need to leak here to avoid freeing before other systems try and use it
+        let _ = Box::into_raw(value);
+
+        self.count += 1;
+
+        if self.count == self.max {
+            return lock_step::State::Stopped;
         }
+
+        lock_step::State::Running
     }
 }
 
 fn main() {
-    let workers = Step::from_stream(1..=1000)
-        .add_system(MetricRecorder::new(Counter { count: 0 }))
-        .add_system(MetricRecorder::new(Average { sum: 0, count: 0 }))
-        .add_system(MetricRecorder::new(Maximum { max: 0 }))
-        .add_system(MetricRecorder::new(Minimum { min: usize::MAX }))
-        .run();
+    // TODO: tidy up creation with macros
+    let adder = AddOne;
+    let stringer = ToString;
 
-    for worker in workers {
-        println!("{:?}", worker)
-    }
+    let adder_pair = PreprocessorPair::new(adder);
+    let stringer_pair = PreprocessorPair::new(stringer);
+
+    let int_printer = IntPrinter::new(5);
+    let str_printer = StringPrinter::new(10);
+
+    let adder_system = SystemPair::new(adder_pair.id(), int_printer);
+    let stringer_system = SystemPair::new(stringer_pair.id(), str_printer);
+
+    let mut step = Step::new();
+
+    step.add_preprocessor(adder_pair);
+    step.add_preprocessor(stringer_pair);
+
+    step.add_system(adder_system);
+    step.add_system(stringer_system);
+
+    let stream: Vec<i32> = (0..50).collect();
+
+    let _ = step.run(stream);
 }
