@@ -6,21 +6,20 @@ pub enum State {
     Stopped,
 }
 
-pub trait System<In, Out> {
+pub trait System<In>: std::fmt::Debug {
     fn step(&mut self, value: Rc<In>) -> State;
-    fn report(&self) -> Out;
 }
 
-pub struct Step<Stream, In, Out>
+pub struct Step<Stream, In>
 where
     Stream: IntoIterator<Item = In>,
 {
     stream: Option<Stream>,
-    alive: Vec<Box<dyn System<In, Out>>>,
-    dead: Vec<Box<dyn System<In, Out>>>,
+    alive: Vec<Box<dyn System<In>>>,
+    dead: Vec<Box<dyn System<In>>>,
 }
 
-impl<Stream, In, Out> Step<Stream, In, Out>
+impl<Stream, In> Step<Stream, In>
 where
     Stream: IntoIterator<Item = In>,
 {
@@ -32,7 +31,7 @@ where
         }
     }
 
-    pub fn run(mut self) -> Vec<Out> {
+    pub fn run(mut self) -> Vec<Box<dyn System<In>>> {
         let stream = self.stream.take().unwrap();
 
         for value in stream {
@@ -41,15 +40,11 @@ where
             }
         }
 
-        self.alive
-            .into_iter()
-            .chain(self.dead)
-            .map(|system| system.report())
-            .collect()
+        self.alive.into_iter().chain(self.dead).collect()
     }
 
-    pub fn add_system<S: Default + System<In, Out> + 'static>(mut self) -> Self {
-        self.alive.push(Box::new(S::default()));
+    pub fn add_system<S: System<In> + 'static>(mut self, system: S) -> Self {
+        self.alive.push(Box::new(system));
         self
     }
 
