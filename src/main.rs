@@ -1,15 +1,12 @@
-use lock_step::{Preprocessor, PreprocessorPair, Step, System, SystemPair};
+use lock_step::{Preprocessor, State, Step, System};
 
 #[derive(Hash)]
 struct AddOne;
 
 impl Preprocessor<i32> for AddOne {
-    fn preprocess(&mut self, value: &i32) -> *mut u8 {
-        Box::into_raw(Box::new(value + 1)) as *mut u8
-    }
-
-    unsafe fn cleanup(&mut self, value: *mut u8) {
-        let _ = Box::from_raw(value as *mut i32);
+    fn preprocess(&mut self, value: &i32) -> Vec<u8> {
+        let value = value + 1;
+        value.to_be_bytes().to_vec()
     }
 }
 
@@ -17,12 +14,8 @@ impl Preprocessor<i32> for AddOne {
 struct ToString;
 
 impl Preprocessor<i32> for ToString {
-    fn preprocess(&mut self, value: &i32) -> *mut u8 {
-        Box::into_raw(Box::new(value.to_string())) as *mut u8
-    }
-
-    unsafe fn cleanup(&mut self, value: *mut u8) {
-        let _ = Box::from_raw(value as *mut String);
+    fn preprocess(&mut self, value: &i32) -> Vec<u8> {
+        value.to_string().into_bytes()
     }
 }
 
@@ -38,21 +31,19 @@ impl IntPrinter {
 }
 
 impl System for IntPrinter {
-    fn step(&mut self, value: *mut u8) -> lock_step::State {
-        // Is this casting safe if we are sure that the value is an i32?
-        let value = unsafe { Box::from_raw(value as *mut i32) };
-        println!("Int: {}", value);
-
-        // Need to leak here to avoid freeing before other systems try and use it
-        let _ = Box::into_raw(value);
+    fn step(&mut self, value: &[&[u8]]) -> State {
+        for v in value {
+            let v = i32::from_be_bytes(v.to_vec().try_into().unwrap());
+            println!("{}", v);
+        }
 
         self.count += 1;
 
-        if self.count == self.max {
-            return lock_step::State::Stopped;
+        if self.count >= self.max {
+            State::Stopped
+        } else {
+            State::Running
         }
-
-        lock_step::State::Running
     }
 }
 
@@ -68,21 +59,19 @@ impl StringPrinter {
 }
 
 impl System for StringPrinter {
-    fn step(&mut self, value: *mut u8) -> lock_step::State {
-        // Is this casting safe if we are sure that the value is a String?
-        let value = unsafe { Box::from_raw(value as *mut String) };
-        println!("String: {}", value);
-
-        // Need to leak here to avoid freeing before other systems try and use it
-        let _ = Box::into_raw(value);
+    fn step(&mut self, value: &[&[u8]]) -> State {
+        for v in value {
+            let v = String::from_utf8(v.to_vec()).unwrap();
+            println!("String: {}", v);
+        }
 
         self.count += 1;
 
-        if self.count == self.max {
-            return lock_step::State::Stopped;
+        if self.count >= self.max {
+            State::Stopped
+        } else {
+            State::Running
         }
-
-        lock_step::State::Running
     }
 }
 
@@ -91,24 +80,18 @@ fn main() {
     let adder = AddOne;
     let stringer = ToString;
 
-    let adder_pair = PreprocessorPair::new(adder);
-    let stringer_pair = PreprocessorPair::new(stringer);
-
-    let int_printer = IntPrinter::new(5);
-    let str_printer = StringPrinter::new(10);
-
-    let adder_system = SystemPair::new(adder_pair.id(), int_printer);
-    let stringer_system = SystemPair::new(stringer_pair.id(), str_printer);
+    let stream: Vec<i32> = (0..50).collect();
 
     let mut step = Step::new();
 
-    step.add_preprocessor(adder_pair);
-    step.add_preprocessor(stringer_pair);
+    let adder_key = step.add_preprocessor(adder);
+    let stringer_key = step.add_preprocessor(stringer);
 
-    step.add_system(adder_system);
-    step.add_system(stringer_system);
+    let int_printer = IntPrinter::new(10);
+    let string_printer = StringPrinter::new(5);
 
-    let stream: Vec<i32> = (0..50).collect();
+    step.add_system(int_printer, &[adder_key]);
+    step.add_system(string_printer, &[stringer_key]);
 
     let _ = step.run(stream);
 }
